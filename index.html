@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Chicken Farm Tycoon - Prototype</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            /* Prevent default touch actions like refresh, swipe, etc. */
+            touch-action: none;
+        }
+
+        #game-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 10px;
+            font-family: sans-serif;
+            font-size: 18px;
+            font-weight: bold;
+            pointer-events: none; /* Let clicks pass through to canvas */
+            z-index: 10;
+        }
+
+        /* Joystick UI */
+        #joystick-zone {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 5;
+            /* touch-action: none is also handled here just in case */
+        }
+
+        #joystick-base {
+            position: absolute;
+            width: 100px;
+            height: 100px;
+            background-color: rgba(255, 255, 255, 0.2);
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+            pointer-events: none;
+        }
+
+        #joystick-stick {
+            position: absolute;
+            width: 40px;
+            height: 40px;
+            background-color: rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            display: none;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="ui-layer">사료 개수: <span id="feed-count">0</span></div>
+
+    <div id="joystick-zone"></div>
+    <div id="joystick-base"></div>
+    <div id="joystick-stick"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // 1. Scene, Camera, Renderer Initialization
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky blue background
+
+        const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+        // Isometric-style setup
+        const cameraOffset = new THREE.Vector3(15, 20, 15);
+        camera.position.copy(cameraOffset);
+        camera.lookAt(0, 0, 0);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // Window resize handling
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // 2. Lights and Environment
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(10, 20, 10);
+        scene.add(directionalLight);
+
+        // Ground
+        const groundGeo = new THREE.PlaneGeometry(50, 50);
+        const groundMat = new THREE.MeshStandardMaterial({ color: 0x4CAF50 }); // Green grass
+        const ground = new THREE.Mesh(groundGeo, groundMat);
+        ground.rotation.x = -Math.PI / 2;
+        scene.add(ground);
+
+        // 3. Game Objects
+        // Player (Yellow Cube)
+        const playerGeo = new THREE.BoxGeometry(1, 1, 1);
+        const playerMat = new THREE.MeshStandardMaterial({ color: 0xFFFF00 });
+        const player = new THREE.Mesh(playerGeo, playerMat);
+        player.position.set(0, 0.5, 0); // Rest on the ground
+        scene.add(player);
+
+        // Feed Storage (Blue Cube) - 사료 창고
+        const storageGeo = new THREE.BoxGeometry(2, 2, 2);
+        const storageMat = new THREE.MeshStandardMaterial({ color: 0x0000FF });
+        const storage = new THREE.Mesh(storageGeo, storageMat);
+        storage.position.set(-5, 1, -5);
+        scene.add(storage);
+
+        // Feed Trough (Red Cube) - 밥통
+        const troughGeo = new THREE.BoxGeometry(2, 1, 2);
+        const troughMat = new THREE.MeshStandardMaterial({ color: 0xFF0000 });
+        const trough = new THREE.Mesh(troughGeo, troughMat);
+        trough.position.set(5, 0.5, 5);
+        scene.add(trough);
+
+        // 4. Game State & Logic
+        let feedCount = 0;
+        let troughFeedCount = 0;
+        const feedCountElement = document.getElementById('feed-count');
+
+        let lastInteractTime = 0;
+        const INTERACT_INTERVAL = 0.5; // seconds
+        const INTERACT_RADIUS = 3.0; // Distance to trigger interaction
+
+        // Joystick State
+        let isDragging = false;
+        let startX = 0, startY = 0;
+        let currentX = 0, currentY = 0;
+        const joystickMaxRadius = 50;
+        const moveVector = new THREE.Vector2(0, 0);
+
+        // Joystick UI Elements
+        const joystickZone = document.getElementById('joystick-zone');
+        const joystickBase = document.getElementById('joystick-base');
+        const joystickStick = document.getElementById('joystick-stick');
+
+        // Touch Events
+        joystickZone.addEventListener('pointerdown', (e) => {
+            isDragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            currentX = e.clientX;
+            currentY = e.clientY;
+
+            joystickBase.style.display = 'block';
+            joystickStick.style.display = 'block';
+            joystickBase.style.left = startX + 'px';
+            joystickBase.style.top = startY + 'px';
+            joystickStick.style.left = startX + 'px';
+            joystickStick.style.top = startY + 'px';
+
+            updateJoystickState();
+        });
+
+        joystickZone.addEventListener('pointermove', (e) => {
+            if (!isDragging) return;
+            currentX = e.clientX;
+            currentY = e.clientY;
+            updateJoystickState();
+        });
+
+        joystickZone.addEventListener('pointerup', (e) => {
+            isDragging = false;
+            joystickBase.style.display = 'none';
+            joystickStick.style.display = 'none';
+            moveVector.set(0, 0);
+        });
+
+        joystickZone.addEventListener('pointercancel', (e) => {
+            isDragging = false;
+            joystickBase.style.display = 'none';
+            joystickStick.style.display = 'none';
+            moveVector.set(0, 0);
+        });
+
+        function updateJoystickState() {
+            let dx = currentX - startX;
+            let dy = currentY - startY;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance > joystickMaxRadius) {
+                dx = (dx / distance) * joystickMaxRadius;
+                dy = (dy / distance) * joystickMaxRadius;
+            }
+
+            joystickStick.style.left = (startX + dx) + 'px';
+            joystickStick.style.top = (startY + dy) + 'px';
+
+            // Normalize vector from -1 to 1
+            moveVector.set(dx / joystickMaxRadius, dy / joystickMaxRadius);
+        }
+
+        // 5. Main Loop
+        const clock = new THREE.Clock();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            // Handle Movement based on Camera Direction
+            if (moveVector.lengthSq() > 0.01) {
+                // Get camera forward direction projected on XZ plane
+                const cameraForward = new THREE.Vector3();
+                camera.getWorldDirection(cameraForward);
+                cameraForward.y = 0;
+                cameraForward.normalize();
+
+                // Get camera right direction
+                // ThreeJS crossVectors(a, b) = a x b
+                // camera forward x camera up = right vector
+                const cameraRight = new THREE.Vector3();
+                cameraRight.crossVectors(cameraForward, camera.up).normalize();
+
+                // Calculate movement speed
+                const speed = 5 * delta;
+
+                // Move Vector mapping:
+                // MoveVector.x represents Right(+) / Left(-)
+                // MoveVector.y represents Down(+) / Up(-) in screen space
+                // Screen Y decreases upwards, pushing stick up means moveVector.y is negative.
+                // Thus we negate moveVector.y when mapping to Forward.
+                // If it goes opposite for Left/Right, we would negate moveVector.x. Here forward x up = right.
+                const movement = new THREE.Vector3(0, 0, 0);
+                movement.addScaledVector(cameraRight, moveVector.x);
+                movement.addScaledVector(cameraForward, -moveVector.y);
+
+                if (movement.lengthSq() > 0) {
+                    movement.normalize();
+                    player.position.addScaledVector(movement, speed);
+                }
+            }
+
+            // Smoothly move camera to follow player
+            const targetCameraPos = player.position.clone().add(cameraOffset);
+            camera.position.lerp(targetCameraPos, 5 * delta);
+
+            // Auto-Interact Logic
+            if (time - lastInteractTime >= INTERACT_INTERVAL) {
+                // Check distance to storage
+                if (player.position.distanceTo(storage.position) <= INTERACT_RADIUS) {
+                    feedCount++;
+                    feedCountElement.innerText = feedCount;
+                    lastInteractTime = time;
+                }
+                // Check distance to trough
+                else if (player.position.distanceTo(trough.position) <= INTERACT_RADIUS) {
+                    if (feedCount > 0) {
+                        feedCount--;
+                        troughFeedCount++;
+                        feedCountElement.innerText = feedCount;
+                        // You could display troughFeedCount here too if needed
+                        lastInteractTime = time;
+                    }
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+    </script>
+</body>
+</html>
