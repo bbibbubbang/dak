@@ -74,7 +74,7 @@
     </style>
 </head>
 <body>
-    <div id="ui-layer">사료: <span id="feed-count">0</span> | 달걀: <span id="egg-count">0</span> | 골드: <span id="gold-count">0</span></div>
+    <div id="ui-layer">💰 골드: <span id="gold-count">0</span> | 📦 가방: <span id="bag-count">0</span>/<span id="max-capacity">10</span></div>
 
     <div id="joystick-zone"></div>
     <div id="joystick-base"></div>
@@ -209,12 +209,15 @@
         }
 
         // 4. Game State & Logic
-        let feedCount = 0;
+        const maxCapacity = 10;
+        const carriedItems = []; // Contains { type: 'feed'|'egg', mesh: THREE.Mesh }
+        const activeAnimations = []; // Contains animation objects
+        const troughFeedMeshes = []; // Meshes visually placed on the trough
         let troughFeedCount = 0;
-        const feedCountElement = document.getElementById('feed-count');
 
-        let eggCount = 0;
-        const eggCountElement = document.getElementById('egg-count');
+        const bagCountElement = document.getElementById('bag-count');
+        const maxCapacityElement = document.getElementById('max-capacity');
+        maxCapacityElement.innerText = maxCapacity;
 
         let goldCount = 0;
         const goldCountElement = document.getElementById('gold-count');
@@ -358,7 +361,12 @@
                     } else {
                         if (troughFeedCount > 0) {
                             troughFeedCount--;
-                            feedCountElement.innerText = feedCount; // Not strictly correct var name to update, but visual
+
+                            // Remove visual mesh from trough
+                            if (troughFeedMeshes.length > 0) {
+                                const mesh = troughFeedMeshes.pop();
+                                scene.remove(mesh);
+                            }
 
                             // Find an empty nest
                             let emptyNest = null;
@@ -429,6 +437,35 @@
             }
         }
 
+        function updateAnimations(delta) {
+            for (let i = activeAnimations.length - 1; i >= 0; i--) {
+                const anim = activeAnimations[i];
+                anim.elapsed += delta;
+                let progress = anim.elapsed / anim.duration;
+
+                if (progress >= 1.0) {
+                    progress = 1.0;
+                }
+
+                // Homing: Update target position if it's dynamic
+                const currentTargetPos = typeof anim.targetPos === 'function' ? anim.targetPos() : anim.targetPos;
+
+                // X and Z Lerp
+                anim.mesh.position.x = THREE.MathUtils.lerp(anim.startPos.x, currentTargetPos.x, progress);
+                anim.mesh.position.z = THREE.MathUtils.lerp(anim.startPos.z, currentTargetPos.z, progress);
+
+                // Y Parabolic curve using Math.sin
+                const baseHeight = THREE.MathUtils.lerp(anim.startPos.y, currentTargetPos.y, progress);
+                const arcHeight = Math.sin(progress * Math.PI) * anim.peakHeight;
+                anim.mesh.position.y = baseHeight + arcHeight;
+
+                if (progress >= 1.0) {
+                    if (anim.onComplete) anim.onComplete(anim.mesh);
+                    activeAnimations.splice(i, 1);
+                }
+            }
+        }
+
         // 5. Main Loop
         const clock = new THREE.Clock();
 
@@ -437,6 +474,8 @@
 
             const delta = clock.getDelta();
             const time = clock.getElapsedTime();
+
+            updateAnimations(delta);
 
             // Update Chickens
             for (const chicken of chickens) {
@@ -484,23 +523,93 @@
 
             // Egg Collection
             for (const egg of eggPool) {
-                if (egg.visible && player.position.distanceTo(egg.position) <= INTERACT_RADIUS) {
+                if (egg.visible && player.position.distanceTo(egg.position) <= INTERACT_RADIUS && carriedItems.length < maxCapacity) {
                     egg.visible = false;
                     if (egg.userData.nest) {
                         egg.userData.nest.userData.hasEgg = false;
                     }
-                    eggCount++;
-                    eggCountElement.innerText = eggCount;
+
+                    // Create a new visual egg for the animation/stack instead of using the pooled one directly
+                    const carriedEgg = new THREE.Mesh(eggGeo, eggMat);
+                    carriedEgg.position.copy(egg.position);
+                    scene.add(carriedEgg);
+
+                    activeAnimations.push({
+                        mesh: carriedEgg,
+                        startPos: carriedEgg.position.clone(),
+                        targetPos: () => {
+                            const pos = player.position.clone();
+                            pos.y += 1 + carriedItems.length * 0.5;
+                            return pos;
+                        },
+                        duration: 0.5,
+                        elapsed: 0,
+                        peakHeight: 2.0,
+                        onComplete: (mesh) => {
+                            scene.remove(mesh);
+                            stackGroup.add(mesh);
+                            mesh.position.set(0, 1 + carriedItems.length * 0.5, 0); // Local stack pos
+                            carriedItems.push({ type: 'egg', mesh: mesh });
+                            bagCountElement.innerText = carriedItems.length;
+                        }
+                    });
                 }
             }
 
             // Sell Zone Logic
             if (player.position.distanceTo(sellZone.position) <= INTERACT_RADIUS) {
-                if (eggCount > 0 && time - lastSellTime >= 0.2) {
-                    eggCount--;
-                    goldCount += 10;
-                    eggCountElement.innerText = eggCount;
-                    goldCountElement.innerText = goldCount;
+                // Find all eggs in inventory
+                const eggIndexes = [];
+                carriedItems.forEach((item, index) => {
+                    if (item.type === 'egg') eggIndexes.push(index);
+                });
+
+                if (eggIndexes.length > 0 && time - lastSellTime >= 0.2) {
+                    // Extract eggs
+                    const eggsToSell = [];
+                    // Iterate backwards to remove without messing up indexes
+                    for (let i = eggIndexes.length - 1; i >= 0; i--) {
+                        const index = eggIndexes[i];
+                        const item = carriedItems[index];
+                        eggsToSell.push(item);
+                        carriedItems.splice(index, 1);
+                        stackGroup.remove(item.mesh);
+                        scene.add(item.mesh); // Re-add to scene for animation
+                    }
+
+                    // Update visuals of remaining items in stack
+                    carriedItems.forEach((carried, index) => {
+                        carried.mesh.position.set(0, 1 + index * 0.5, 0);
+                    });
+                    bagCountElement.innerText = carriedItems.length;
+
+                    // Animate eggs to sell zone
+                    eggsToSell.forEach((item, i) => {
+                        const worldPos = new THREE.Vector3();
+                        item.mesh.getWorldPosition(worldPos);
+                        item.mesh.position.copy(worldPos);
+
+                        activeAnimations.push({
+                            mesh: item.mesh,
+                            startPos: item.mesh.position.clone(),
+                            targetPos: () => {
+                                const pos = sellZone.position.clone();
+                                pos.x += (Math.random() - 0.5) * 2; // Spread across sell zone
+                                pos.z += (Math.random() - 0.5) * 2;
+                                pos.y += 0.5;
+                                return pos;
+                            },
+                            duration: 0.5,
+                            elapsed: 0,
+                            peakHeight: 1.5,
+                            onComplete: (mesh) => {
+                                goldCount += 10; // Add gold per egg
+                                goldCountElement.innerText = goldCount;
+                                scene.remove(mesh); // Remove the visual egg
+                            }
+                        });
+                    });
+
                     lastSellTime = time;
                 }
             }
@@ -508,17 +617,79 @@
             if (time - lastInteractTime >= INTERACT_INTERVAL) {
                 // Check distance to storage
                 if (player.position.distanceTo(storage.position) <= INTERACT_RADIUS) {
-                    feedCount++;
-                    feedCountElement.innerText = feedCount;
-                    lastInteractTime = time;
+                    if (carriedItems.length < maxCapacity) {
+                        const feedGeo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+                        const feedMat = new THREE.MeshStandardMaterial({ color: 0x00FF00 }); // Green feed block
+                        const feedMesh = new THREE.Mesh(feedGeo, feedMat);
+
+                        feedMesh.position.copy(storage.position);
+                        feedMesh.position.y += 1; // Start from top of storage
+                        scene.add(feedMesh);
+
+                        activeAnimations.push({
+                            mesh: feedMesh,
+                            startPos: feedMesh.position.clone(),
+                            targetPos: () => {
+                                const pos = player.position.clone();
+                                pos.y += 1 + carriedItems.length * 0.5; // Stack vertically based on count
+                                return pos;
+                            },
+                            duration: 0.5,
+                            elapsed: 0,
+                            peakHeight: 2.0,
+                            onComplete: (mesh) => {
+                                scene.remove(mesh);
+                                stackGroup.add(mesh);
+                                mesh.position.set(0, 1 + carriedItems.length * 0.5, 0); // Local stack pos
+                                carriedItems.push({ type: 'feed', mesh: mesh });
+                                bagCountElement.innerText = carriedItems.length;
+                            }
+                        });
+
+                        lastInteractTime = time;
+                    }
                 }
                 // Check distance to trough
                 else if (player.position.distanceTo(trough.position) <= INTERACT_RADIUS) {
-                    if (feedCount > 0) {
-                        feedCount--;
-                        troughFeedCount++;
-                        feedCountElement.innerText = feedCount;
-                        // You could display troughFeedCount here too if needed
+                    // Find a feed in inventory
+                    const feedIndex = carriedItems.map(item => item.type).lastIndexOf('feed');
+                    if (feedIndex !== -1) {
+                        const item = carriedItems[feedIndex];
+                        carriedItems.splice(feedIndex, 1);
+                        stackGroup.remove(item.mesh);
+                        scene.add(item.mesh);
+
+                        // Need to update position to world coordinates for animation
+                        const worldPos = new THREE.Vector3();
+                        item.mesh.getWorldPosition(worldPos);
+                        item.mesh.position.copy(worldPos);
+
+                        // Update visuals of remaining items in stack
+                        carriedItems.forEach((carried, index) => {
+                            carried.mesh.position.set(0, 1 + index * 0.5, 0);
+                        });
+                        bagCountElement.innerText = carriedItems.length;
+
+                        activeAnimations.push({
+                            mesh: item.mesh,
+                            startPos: item.mesh.position.clone(),
+                            targetPos: () => {
+                                const pos = trough.position.clone();
+                                pos.x += (Math.random() - 0.5); // Randomize placement inside trough slightly
+                                pos.z += (Math.random() - 0.5);
+                                pos.y += 0.5; // Sit on top of trough
+                                return pos;
+                            },
+                            duration: 0.5,
+                            elapsed: 0,
+                            peakHeight: 1.5,
+                            onComplete: (mesh) => {
+                                troughFeedCount++;
+                                troughFeedMeshes.push(mesh);
+                                // The mesh is now visually in the trough
+                            }
+                        });
+
                         lastInteractTime = time;
                     }
                 }
